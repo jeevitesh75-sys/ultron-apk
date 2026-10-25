@@ -43,7 +43,12 @@ final class Brain {
     private static synchronized JSONArray tools() throws JSONException {
         if (tools == null) {
             JSONArray t = new JSONArray();
-            t.put(tool("open_app", "Open ANY installed app on the phone by its name (instagram, youtube, whatsapp, camera, settings, phonepe...).", "name|string|app name"));
+            t.put(tool("open_app", "Open ANY installed app on the phone by its name (instagram, youtube, whatsapp, camera, settings, phonepe...). Always give the app name in English letters, even if the user spoke Telugu.", "name|string|app name in English letters"));
+            t.put(tool("close_app", "REALLY close an app (force stop it). Use whenever the user says close, kill, exit or stop an app. Give the app name in English letters, or the word current for the app that is open right now.", "name|string|app name in English letters, or current"));
+            t.put(tool("close_all_apps", "Close all recent apps (presses Clear all in the recent apps screen)."));
+            t.put(tool("go_home", "Go to the phone home screen."));
+            t.put(tool("open_hologram", "Open the Ultron hologram page in Chrome. Use when the user says open hologram."));
+            t.put(tool("generate_image", "Open the hologram page in Chrome and generate an image from the user's description. Use when the user asks to generate, draw or make an image or picture of something. Write the prompt in English.", "prompt|string|detailed English description of the image"));
             t.put(tool("open_url", "Open a web link.", "url|string|full https link"));
             t.put(tool("play_youtube", "Search YouTube.", "query|string|search words"));
             t.put(tool("web_search", "Search Google.", "query|string|search words"));
@@ -91,6 +96,7 @@ final class Brain {
         String today = new SimpleDateFormat("yyyy-MM-dd", Locale.US).format(new java.util.Date());
         String system = persona(ctx).replace("{name}", Prefs.callMe(ctx)).replace("{today}", today).replace("{device}", device);
         if (Prefs.crude(ctx)) system = system + " " + CRUDE;
+        system = system + " The user's preferred language is " + ("te".equals(Prefs.lang(ctx)) ? "Telugu (they may also mix in English words)." : "English.");
 
         JSONArray msgs = new JSONArray();
         msgs.put(msg("system", system));
@@ -120,6 +126,18 @@ final class Brain {
             }
         }
         return "That took too many steps, " + Prefs.callMe(ctx) + ".";
+    }
+
+    /** Plain chat (no tools). Used by the hologram page. msgs items are {role, content}. */
+    static String chat(Context ctx, JSONArray msgs, int maxTokens) throws Exception {
+        String key = Prefs.key(ctx);
+        if (key.isEmpty()) throw new Exception("There is no API key yet. Open Ultron and paste your Groq key.");
+        String model = Prefs.model(ctx);
+        JSONObject body = new JSONObject().put("model", model).put("messages", msgs).put("temperature", 0.6).put("max_tokens", maxTokens);
+        if (model.contains("gpt-oss")) body.put("reasoning_effort", "low");
+        JSONObject res = post(key, body);
+        JSONObject m = res.getJSONArray("choices").getJSONObject(0).getJSONObject("message");
+        return m.isNull("content") ? "" : m.getString("content").trim();
     }
 
     private static JSONObject post(String key, JSONObject body) throws Exception {

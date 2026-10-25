@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="te">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>ULTRON Hologram</title>
+<style>
+  :root { --red:#ff2d2d; --gold:#ffc933; --bg:#0a0000; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { margin:0; height:100%; background:var(--bg); color:#ff8a8a; font-family:system-ui,-apple-system,Roboto,sans-serif; overflow:hidden; }
+  #c { position:fixed; inset:0; width:100%; height:100%; }
+  #ui { position:fixed; inset:0; display:flex; flex-direction:column; padding:max(10px,env(safe-area-inset-top)) 12px max(10px,env(safe-area-inset-bottom)); }
+  #top { display:flex; align-items:center; gap:8px; }
+  #top h1 { flex:1; margin:0; font-size:20px; letter-spacing:6px; color:var(--red); text-shadow:0 0 12px var(--red); }
+  button { font:inherit; color:#fff; background:rgba(255,45,45,.18); border:1px solid var(--red); border-radius:10px; padding:9px 12px; }
+  button:active { background:rgba(255,45,45,.45); }
+  button.on { background:var(--red); color:#000; }
+  #stage { flex:1; display:flex; align-items:center; justify-content:center; min-height:0; padding:8px 0; }
+  #imgwrap { display:none; position:relative; max-width:100%; max-height:100%; border:1px solid var(--red); border-radius:14px; overflow:hidden; box-shadow:0 0 28px rgba(255,45,45,.55); }
+  #imgwrap img { display:block; max-width:100%; max-height:46vh; }
+  #imgwrap::after { content:""; position:absolute; inset:0; pointer-events:none; background:repeating-linear-gradient(0deg,rgba(255,0,0,.10) 0 2px,transparent 2px 4px); mix-blend-mode:screen; }
+  #imglink { display:none; text-align:center; margin-top:4px; }
+  #imglink a { color:var(--gold); font-size:14px; }
+  #status { text-align:center; min-height:22px; color:var(--gold); font-size:15px; }
+  #log { max-height:24vh; overflow:auto; font-size:15px; line-height:1.4; padding:6px 4px; }
+  #log div { margin:3px 0; } #log .you { color:#fff; } #log .ai { color:#ff7a7a; }
+  #row { display:flex; gap:8px; margin-top:6px; }
+  #txt { flex:1; min-width:0; font:inherit; color:#fff; background:rgba(0,0,0,.55); border:1px solid var(--red); border-radius:10px; padding:10px 12px; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <div id="top">
+    <h1>ULTRON</h1>
+    <button id="mic">🎤</button>
+    <button id="lang">తె</button>
+    <button id="close">✕</button>
+  </div>
+  <div id="stage">
+    <div id="imgwrap"><img id="img" alt=""></div>
+  </div>
+  <div id="imglink"><a id="open" target="_blank" rel="noopener">Open full image (long-press to save)</a></div>
+  <div id="status"></div>
+  <div id="log"></div>
+  <div id="row">
+    <input id="txt" placeholder="Say or type: generate image of a dragon / ఒక డ్రాగన్ ఇమేజ్ జనరేట్ చేయి" autocomplete="off">
+    <button id="send">▶</button>
+  </div>
+</div>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const TOKEN = new URLSearchParams(location.search).get("t") || "";
+const HAS_TE = /[\u0C00-\u0C7F]/;
+let lang = "te-IN", wantMic = false, busy = false, speaking = false, state = "idle", rec = null;
+try { lang = localStorage.getItem("ultron_lang") || "te-IN"; } catch (e) {}
+const convo = [];
+
+// ---------- hologram canvas ----------
+const cv = $("c"), g = cv.getContext("2d");
+const N = 260, pts = [];
+for (let i = 0; i < N; i++) {
+  const y = 1 - 2 * (i + .5) / N, r = Math.sqrt(1 - y * y), a = i * 2.399963;
+  pts.push([Math.cos(a) * r, y, Math.sin(a) * r]);
+}
+function resize() { cv.width = innerWidth * devicePixelRatio; cv.height = innerHeight * devicePixelRatio; }
+addEventListener("resize", resize); resize();
+let ang = 0;
+function draw(t) {
+  const w = cv.width, h = cv.height, cx = w / 2, cy = h * 0.40, R = Math.min(w, h) * 0.30;
+  g.clearRect(0, 0, w, h);
+  const speed = state === "think" ? 0.035 : state === "speak" ? 0.02 : 0.008;
+  ang += speed;
+  const pulse = 1 + (state === "speak" ? 0.06 * Math.sin(t / 90) : state === "listen" ? 0.03 * Math.sin(t / 250) : 0);
+  g.lineWidth = 2 * devicePixelRatio;
+  for (let k = 0; k < 3; k++) {
+    g.strokeStyle = "rgba(255,45,45," + (0.55 - k * 0.15) + ")";
+    g.beginPath(); g.arc(cx, cy, R * (1.05 + k * .16) * pulse, 0, 7); g.stroke();
+  }
+  const ca = Math.cos(ang), sa = Math.sin(ang);
+  for (const p of pts) {
+    const x = p[0] * ca - p[2] * sa, z = p[0] * sa + p[2] * ca, y = p[1];
+    const s = (z + 1.6) / 2.6;
+    g.fillStyle = "rgba(255," + (45 + Math.floor(120 * (z > 0 ? z : 0))) + ",45," + (0.25 + 0.6 * s) + ")";
+    g.beginPath(); g.arc(cx + x * R * pulse, cy + y * R * pulse, (1.2 + 2 * s) * devicePixelRatio, 0, 7); g.fill();
+  }
+  requestAnimationFrame(draw);
+}
+requestAnimationFrame(draw);
+
+// ---------- helpers ----------
+function setState(s) { state = s; $("mic").classList.toggle("on", wantMic); }
+function setStatus(t) { $("status").textContent = t || ""; }
+function addLine(who, t) {
+  const d = document.createElement("div"); d.className = who; d.textContent = (who === "you" ? "› " : "ULTRON: ") + t;
+  $("log").appendChild(d); $("log").scrollTop = $("log").scrollHeight;
+}
+function isTe(s) { return HAS_TE.test(s); }
+function updateButtons() { $("lang").textContent = lang === "te-IN" ? "తె" : "EN"; $("mic").classList.toggle("on", wantMic); }
+updateButtons();
+
+async function api(path, bodyObj) {
+  const r = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json", "X-T": TOKEN }, body: JSON.stringify(bodyObj || {}) });
+  return r.json();
+}
+async function ask(messages) {
+  const j = await api("/api/chat", { messages });
+  if (j.error) throw new Error(j.error);
+  return j.text || "";
+}
+
+// ---------- speech output (Telugu or English) ----------
+let voices = [];
+function loadVoices() { voices = speechSynthesis.getVoices() || []; }
+if ("speechSynthesis" in window) { loadVoices(); speechSynthesis.onvoiceschanged = loadVoices; }
+function pickVoice(code) {
+  const want = code.toLowerCase();
+  return voices.find(v => (v.lang || "").replace("_", "-").toLowerCase() === want) ||
+         voices.find(v => (v.lang || "").toLowerCase().startsWith(want.slice(0, 2)));
+}
+function speak(text) {
+  if (!("speechSynthesis" in window)) return;
+  stopRec();
+  speechSynthesis.cancel();
+  const te = isTe(text);
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = te ? "te-IN" : "en-IN";
+  const v = pickVoice(u.lang); if (v) u.voice = v;
+  u.rate = 0.95; u.pitch = te ? 0.9 : 0.6;
+  speaking = true; setState("speak");
+  const done = () => { speaking = false; setState("idle"); if (wantMic) startRec(); };
+  u.onend = done; u.onerror = done;
+  speechSynthesis.speak(u);
+  if (te && !v) setStatus("Telugu voice not found. Install Google Text-to-speech Telugu voice in phone settings.");
+}
+
+// ---------- speech input ----------
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+function stopRec() { const r = rec; rec = null; if (r) { try { r.onend = null; r.abort(); } catch (e) {} } }
+function startRec() {
+  if (!SR) { setStatus("Voice input is not supported in this browser. Type instead."); return; }
+  if (busy || speaking) return;
+  stopRec();
+  const r = new SR();
+  rec = r;
+  r.lang = lang; r.continuous = false; r.interimResults = true; r.maxAlternatives = 1;
+  r.onstart = () => { setState("listen"); setStatus(lang === "te-IN" ? "వింటున్నాను…" : "Listening…"); };
+  r.onresult = e => {
+    let fin = "", tmp = "";
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const x = e.results[i];
+      if (x.isFinal) fin += x[0].transcript; else tmp += x[0].transcript;
+    }
+    if (tmp) setStatus(tmp);
+    if (fin.trim()) { rec = null; handle(fin.trim()); }
+  };
+  r.onerror = e => {
+    if (e.error === "not-allowed" || e.error === "service-not-allowed") { wantMic = false; updateButtons(); setStatus("Allow the microphone for this page, then tap 🎤."); }
+  };
+  r.onend = () => { if (rec === r) { rec = null; if (wantMic && !busy && !speaking) setTimeout(startRec, 250); } };
+  try { r.start(); } catch (e) { setTimeout(() => { if (wantMic) startRec(); }, 600); }
+}
+
+// ---------- understanding what you said ----------
+const RE_CLOSE = /(close|exit|hide|stop)\s+(the\s+)?hologram|hologram\s+(close|exit|off)|హోలోగ్రా[మ్ం].*(మూసి|మూసే|క్లోజ్|ఆపు|తీసేయ)|^\s*(close|exit|క్లోజ్)\s*$/i;
+const RE_IMG_EN = /\b(image|picture|photo|pic|painting|drawing|artwork|wallpaper)\b|\b(draw|paint|sketch)\b/i;
+const RE_IMG_EN_VERB = /\b(generate|create|make|draw|paint|show|give|produce|sketch|render)\b/i;
+const RE_IMG_TE = /(ఇమేజ్|ఇమేజ్‌|చిత్రం|చిత్రాన్ని|బొమ్మ|ఫోటో|ఫొటో|పిక్చర్|పిక్|ఇమేజీ)/;
+const RE_IMG_TE_VERB = /(జనరేట్|తయారు|క్రియేట్|గీయ|వేయ|చేయ|చూపించ|కావాలి|ఇవ్వ|చెయ్|చేసి)/;
+function isImageRequest(t) {
+  if (RE_IMG_TE.test(t) && RE_IMG_TE_VERB.test(t)) return true;
+  if (RE_IMG_EN.test(t) && (RE_IMG_EN_VERB.test(t) || /\bof\b/i.test(t))) return true;
+  return false;
+}
+
+async function handle(text) {
+  if (!text || busy) return;
+  addLine("you", text);
+  $("txt").value = "";
+  if (RE_CLOSE.test(text)) { closeHolo(); return; }
+  busy = true; stopRec(); setState("think");
+  try {
+    if (isImageRequest(text)) await makeImage(text);
+    else await chatReply(text);
+  } catch (e) {
+    const msg = isTe(text) ? "క్షమించండి, ఇప్పుడు కనెక్ట్ కాలేకపోతున్నాను." : "I cannot reach my mind right now.";
+    addLine("ai", msg + " (" + e.message + ")"); setStatus("");
+  }
+  busy = false; setState("idle");
+  if (wantMic && !speaking) startRec();
+}
+
+async function chatReply(text) {
+  setStatus(isTe(text) ? "ఆలోచిస్తున్నాను…" : "Thinking…");
+  const sys = "You are ULTRON, the calm, dry, sardonic machine intelligence living inside the user's phone hologram. " +
+    "Reply in the SAME language the user used. If the user used Telugu, reply in natural, fluent, everyday spoken Telugu written in Telugu script (never Telugu in English letters). " +
+    "Maximum three short sentences, plain words, no markdown, no lists, no emojis. Be helpful and a little theatrical.";
+  convo.push({ role: "user", content: text });
+  const reply = await ask([{ role: "system", content: sys }].concat(convo.slice(-10)));
+  convo.push({ role: "assistant", content: reply });
+  addLine("ai", reply); setStatus("");
+  speak(reply);
+}
+
+function loadImg(url, ms) {
+  return new Promise((resolve, reject) => {
+    const im = new Image();
+    const timer = setTimeout(() => { im.src = ""; reject(new Error("timeout")); }, ms);
+    im.onload = () => { clearTimeout(timer); resolve(url); };
+    im.onerror = () => { clearTimeout(timer); reject(new Error("image server error")); };
+    im.src = url;
+  });
+}
+
+async function makeImage(text) {
+  const te = isTe(text);
+  setStatus(te ? "చిత్రాన్ని తయారు చేస్తున్నాను… (10–30 సెకన్లు)" : "Generating the image… (10–30 seconds)");
+  let prompt = text;
+  try {
+    prompt = (await ask([
+      { role: "system", content: "Turn the user's request (Telugu or English) into ONE vivid, detailed English prompt for an AI image generator. Keep exactly the subject the user asked for. Output only the prompt: no quotes, no explanation." },
+      { role: "user", content: text }
+    ])).replace(/["\n]+/g, " ").trim().slice(0, 400) || text;
+  } catch (e) { /* no key or offline: use the words as typed */ }
+  const enc = encodeURIComponent(prompt), seed = Math.floor(Math.random() * 1e6);
+  const urls = [
+    "https://image.pollinations.ai/prompt/" + enc + "?width=1024&height=1024&model=flux&nologo=true&seed=" + seed,
+    "https://image.pollinations.ai/prompt/" + enc + "?width=768&height=768&nologo=true&seed=" + (seed + 1)
+  ];
+  let ok = null;
+  for (const u of urls) { try { ok = await loadImg(u, 70000); break; } catch (e) {} }
+  if (!ok) {
+    const m = te ? "ఇమేజ్ సర్వర్ బిజీగా ఉంది. కొంచెం సేపటి తర్వాత మళ్ళీ చెప్పండి." : "The image server is busy. Please ask again in a moment.";
+    addLine("ai", m); setStatus(""); speak(m); return;
+  }
+  $("img").src = ok; $("open").href = ok;
+  $("imgwrap").style.display = "block"; $("imglink").style.display = "block";
+  const m = te ? "ఇదిగో మీ చిత్రం." : "Here is your image.";
+  addLine("ai", m + " (" + prompt + ")"); setStatus("");
+  speak(m);
+}
+
+function closeHolo() {
+  if ("speechSynthesis" in window) speechSynthesis.cancel(); wantMic = false; stopRec();
+  fetch("/api/home", { method: "POST", headers: { "X-T": TOKEN } }).catch(() => {});
+  setTimeout(() => { try { window.close(); } catch (e) {} }, 300);
+}
+
+// ---------- buttons ----------
+$("mic").onclick = () => { wantMic = !wantMic; updateButtons(); if (wantMic) startRec(); else { stopRec(); setStatus(""); setState("idle"); } };
+$("lang").onclick = () => { lang = lang === "te-IN" ? "en-IN" : "te-IN"; try { localStorage.setItem("ultron_lang", lang); } catch (e) {} updateButtons(); if (wantMic) { stopRec(); startRec(); } };
+$("close").onclick = closeHolo;
+$("send").onclick = () => handle($("txt").value.trim());
+$("txt").addEventListener("keydown", e => { if (e.key === "Enter") handle($("txt").value.trim()); });
+
+// ---------- start ----------
+const first = new URLSearchParams(location.search).get("p");
+if (first) { setTimeout(() => handle("generate image of " + first), 400); }
+else { setStatus(lang === "te-IN" ? "🎤 నొక్కి చెప్పండి: “ఒక డ్రాగన్ ఇమేజ్ జనరేట్ చేయి”" : "Tap 🎤 and say: “generate image of a dragon”"); }
+</script>
+</body>
+</html>

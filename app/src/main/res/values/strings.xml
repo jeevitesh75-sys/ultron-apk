@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="access_desc">Lets Ultron close apps for you (presses Force stop and Clear all) when you ask him to.</string>
+</resources>

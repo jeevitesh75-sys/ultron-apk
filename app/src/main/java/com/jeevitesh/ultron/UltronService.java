@@ -31,7 +31,7 @@ import java.util.concurrent.Executors;
 public class UltronService extends Service implements PhoneTools.Host {
     static volatile boolean running = false;
     private static final String CH = "ultron_listen";
-    private static final long AWAKE_MS = 15000;
+    private static final long AWAKE_MS = 30000; // stays awake 30 s after the wake word and 30 s after he finishes talking
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
@@ -44,8 +44,9 @@ public class UltronService extends Service implements PhoneTools.Host {
     private OverlayController overlay;
     private PowerManager.WakeLock wl;
     private PhoneTools tools;
+    private HologramServer holoServer;
+    private boolean teluguMissingWarned = false;
     private int errorCount = 0;
-    private String currentSpeech = "";
 
     @Override public IBinder onBind(Intent i) { return null; }
 
@@ -54,6 +55,7 @@ public class UltronService extends Service implements PhoneTools.Host {
         overlay = new OverlayController(this);
         overlay.setOnTap(this::stopSpeaking);
         tools = new PhoneTools(this, this);
+        holoServer = new HologramServer(this, () -> tools.goHome());
         tts = new TextToSpeech(this, status -> {
             if (status == TextToSpeech.SUCCESS) {
                 tts.setLanguage(new Locale("en", "IN"));
@@ -70,17 +72,47 @@ public class UltronService extends Service implements PhoneTools.Host {
         });
     }
 
-    private void pickMaleVoice() {
+    private static boolean hasTelugu(String t) {
+        for (int i = 0; i < t.length(); i++) { char c = t.charAt(i); if (c >= 0x0C00 && c <= 0x0C7F) return true; }
+        return false;
+    }
+
+    /** Picks a male voice if one exists, otherwise any voice for that language. */
+    private void pickVoice(String lang) {
         try {
             Voice best = null;
             for (Voice v : tts.getVoices()) {
+                if (!v.getLocale().getLanguage().equals(lang)) continue;
                 String n = v.getName().toLowerCase(Locale.ROOT);
-                if (!v.getLocale().getLanguage().equals("en")) continue;
                 if (n.contains("male") && !n.contains("female")) { best = v; break; }
-                if (best == null && v.getLocale().getCountry().equals("IN")) best = v;
+                if (best == null) best = v;
+                else if (lang.equals("en") && v.getLocale().getCountry().equals("IN") && !best.getLocale().getCountry().equals("IN")) best = v;
             }
             if (best != null) tts.setVoice(best);
         } catch (Exception ignored) { }
+    }
+
+    private void pickMaleVoice() { pickVoice("en"); }
+
+    /** Sets the speaking language for this reply. Returns false if Telugu was needed but the phone has no Telugu voice. */
+    private boolean applyLanguageFor(String text) {
+        if (hasTelugu(text)) {
+            int r = tts.setLanguage(new Locale("te", "IN"));
+            if (r == TextToSpeech.LANG_MISSING_DATA || r == TextToSpeech.LANG_NOT_SUPPORTED) {
+                tts.setLanguage(new Locale("en", "IN"));
+                tts.setPitch(0.5f); tts.setSpeechRate(0.9f);
+                return false;
+            }
+            tts.setPitch(0.85f);
+            tts.setSpeechRate(0.95f);
+            pickVoice("te");
+            return true;
+        }
+        tts.setLanguage(new Locale("en", "IN"));
+        tts.setPitch(0.5f);
+        tts.setSpeechRate(0.9f);
+        pickMaleVoice();
+        return true;
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
@@ -116,7 +148,8 @@ public class UltronService extends Service implements PhoneTools.Host {
     // ---- listening loop ----
     private void startListening() {
         if (stopped) return;
-                try {
+        if (speaking) { ui.postDelayed(this::startListening, 500); return; }
+        try {
             if (rec != null) { rec.destroy(); rec = null; }
             if (!SpeechRecognizer.isRecognitionAvailable(this)) { notifyText("Speech recognition is not available on this phone."); return; }
             rec = SpeechRecognizer.createSpeechRecognizer(this);
@@ -143,7 +176,10 @@ public class UltronService extends Service implements PhoneTools.Host {
             });
             Intent i = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
             i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
-            i.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-IN");
+            String rl = "te".equals(Prefs.lang(this)) ? "te-IN" : "en-IN";
+            i.putExtra(RecognizerIntent.EXTRA_LANGUAGE, rl);
+            i.putExtra("android.speech.extra.LANGUAGE_PREFERENCE", rl);
+            if (rl.equals("te-IN")) i.putExtra("android.speech.extra.ADDITIONAL_LANGUAGES", new String[]{"en-IN"});
             i.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5);
             i.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true);
             i.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, getPackageName());
@@ -168,13 +204,22 @@ public class UltronService extends Service implements PhoneTools.Host {
         return p[b.length()];
     }
 
+    /** Telugu spellings of "Ultron" the recognizer may write: starts with a Telugu vowel and contains ల్ట్ర (e.g. అల్ట్రాన్, ఆల్ట్రాన్, ఉల్ట్రాన్). */
+    private static boolean teluguWake(String x) {
+        if (x.length() < 4 || x.length() > 12) return false;
+        char c = x.charAt(0);
+        boolean vowel = c == '\u0C05' || c == '\u0C06' || c == '\u0C09' || c == '\u0C0A' || c == '\u0C12' || c == '\u0C13';
+        return vowel && x.contains("\u0C32\u0C4D\u0C1F\u0C4D\u0C30");
+    }
+
     /** Returns the text after the wake word, "" if only the wake word, or null if no wake word. */
     private static String afterWake(String heard) {
-        String[] w = heard.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9 ]", " ").trim().split("\\s+");
+        String[] w = heard.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9\\u0C00-\\u0C7F ]", " ").trim().split("\\s+");
         for (int i = 0; i < w.length; i++) {
             String x = w[i];
             boolean hit = x.equals("ultron") || x.equals("altron") || x.equals("ultra") || x.equals("oltron") || x.equals("ultran")
-                    || (x.length() >= 5 && x.length() <= 8 && lev(x, "ultron") <= 2 && x.charAt(0) != 'a' || x.equals("altron"));
+                    || (x.length() >= 5 && x.length() <= 8 && lev(x, "ultron") <= 2 && x.charAt(0) != 'a' || x.equals("altron"))
+                    || teluguWake(x);
             if (hit) {
                 StringBuilder sb = new StringBuilder();
                 for (int j = i + 1; j < w.length; j++) sb.append(w[j]).append(' ');
@@ -184,21 +229,10 @@ public class UltronService extends Service implements PhoneTools.Host {
         return null;
     }
 
+    private static boolean te(String s) { return hasTelugu(s); }
+
     private void handleHeard(List<String> alts) {
-        if (alts.isEmpty()) return;
-        if (speaking) {
-            for (String a : alts) {
-                String t = a.toLowerCase(Locale.ROOT).replaceAll("[^a-z ]", " ").trim();
-                if (t.matches("(.*\\b)?(stop|quiet|enough|shut up|be quiet|cancel|silence)(\\b.*)?") && t.split("\\s+").length <= 4
-                        && !currentSpeech.contains(t)) {
-                    stopSpeaking();
-                    awakeUntil = System.currentTimeMillis() + AWAKE_MS;
-                    return;
-                }
-            }
-            return;
-        }
-        if (busy) return;
+        if (alts.isEmpty() || busy) return;
         long now = System.currentTimeMillis();
         boolean awake = now < awakeUntil;
         String cmd = null;
@@ -211,29 +245,57 @@ public class UltronService extends Service implements PhoneTools.Host {
             if (!awake) return;
             cmd = alts.get(0).trim();
         }
+        final String raw = cmd;
         String low = cmd.toLowerCase(Locale.ROOT).replaceAll("[^a-z ]", "").trim();
+        boolean teMode = te(raw) || "te".equals(Prefs.lang(this));
 
         if (pendingConfirm != null && (awake || woke)) {
-            if (low.matches("(yes|yeah|yep|sure|do it|send it|confirm|ok|okay|go ahead).*")) {
+            if (low.matches("(yes|yeah|yep|sure|do it|send it|confirm|ok|okay|go ahead).*") || raw.matches("(?s)^(అవును|సరే|ఓకే|పంపు|చెయ్యి|చేయి).*")) {
                 Runnable r = pendingConfirm; pendingConfirm = null;
                 worker.execute(r);
-                say("It is done.");
+                say(te(raw) ? "అయిపోయింది." : "It is done.");
                 return;
             }
-            if (low.matches("(no|nope|cancel|stop|dont|don't|never mind|nevermind).*")) { pendingConfirm = null; say("Cancelled."); return; }
+            if (low.matches("(no|nope|cancel|stop|dont|don't|never mind|nevermind).*") || raw.matches("(?s)^(వద్దు|కాదు|క్యాన్సిల్|ఆపు|రద్దు).*")) {
+                pendingConfirm = null; say(te(raw) ? "రద్దు చేశాను." : "Cancelled."); return;
+            }
         }
-        if (low.matches("(stop|quiet|shut up|enough|be quiet)")) { stopSpeaking(); overlay.hide(); awakeUntil = 0; return; }
+        if (low.matches("(stop|quiet|shut up|enough|be quiet)") || raw.matches("^(ఆపు|ఆగు|చాలు|సైలెంట్|నోరు మూసుకో)[ .!]*$")) {
+            stopSpeaking(); overlay.hide(); awakeUntil = 0; return;
+        }
         if (woke) {
             overlay.show(HologramView.LISTEN);
             awakeUntil = now + AWAKE_MS;
-            if (cmd.isEmpty()) {
-                try { ((android.os.Vibrator) getSystemService(Context.VIBRATOR_SERVICE)).vibrate(android.os.VibrationEffect.createOneShot(80, 200)); } catch (Exception ignored) { }
-                overlay.hideLater(AWAKE_MS);
-                return;
-            }
+            if (cmd.isEmpty()) { say(teMode ? "చెప్పండి, వింటున్నాను." : "I am listening."); return; }
         }
         if (cmd.isEmpty()) return;
+
+        // "open hologram" is handled right here so it never depends on the AI
+        if (isOpenHologram(raw)) {
+            busy = true;
+            overlay.show(HologramView.THINK);
+            worker.execute(() -> {
+                String r = tools.openHologramNow();
+                final boolean ok = r.startsWith("opened") || r.startsWith("Chrome is not installed");
+                ui.post(() -> {
+                    busy = false;
+                    if (ok) say(te(raw) ? "హోలోగ్రామ్ తెరుస్తున్నాను." : "Opening the hologram.");
+                    else say(te(raw) ? "హోలోగ్రామ్ తెరవలేకపోయాను. డిస్ప్లే ఓవర్ అదర్ యాప్స్ అనుమతి ఇవ్వండి." : "I could not open the hologram. " + r);
+                });
+            });
+            return;
+        }
         think(cmd);
+    }
+
+    private static boolean isOpenHologram(String raw) {
+        String l = raw.toLowerCase(Locale.ROOT);
+        boolean holo = l.contains("hologram") || l.contains("holo gram") || l.contains("holagram") || raw.contains("హోలోగ్ర") || raw.contains("హొలోగ్ర");
+        if (!holo) return false;
+        boolean close = l.contains("close") || l.contains("exit") || l.contains("stop") || raw.contains("మూసి") || raw.contains("మూసే") || raw.contains("క్లోజ్") || raw.contains("ఆపు");
+        // "generate image ... in hologram" goes to the AI so the prompt is kept
+        boolean image = l.contains("image") || l.contains("picture") || l.contains("draw") || raw.contains("ఇమేజ్") || raw.contains("బొమ్మ") || raw.contains("చిత్ర");
+        return !close && !image;
     }
 
     private void think(final String text) {
@@ -257,13 +319,20 @@ public class UltronService extends Service implements PhoneTools.Host {
 
     // ---- speaking ----
     private void say(String text) {
-        awakeUntil = System.currentTimeMillis() + AWAKE_MS;
+        awakeUntil = System.currentTimeMillis() + 120000; // stays awake while talking; the 30 s window starts when he finishes
         overlay.show(HologramView.SPEAK);
         if (!ttsReady) { speechFinished(); return; }
         speaking = true;
-        currentSpeech = text.toLowerCase(Locale.ROOT);
-        String[] parts = text.replaceAll("[*#_`]", "").split("(?<=[.!?])\\s+");
+        try { if (rec != null) rec.cancel(); } catch (Exception ignored) { }
         tts.stop();
+        if (!applyLanguageFor(text)) {
+            if (!teluguMissingWarned) {
+                teluguMissingWarned = true;
+                notifyText("Telugu voice is not installed. Open Ultron and tap 'Install Telugu voice'.");
+            }
+            text = "My Telugu voice is not installed. Open the Ultron app and tap Install Telugu voice.";
+        }
+        String[] parts = text.replaceAll("[*#_`]", "").split("(?<=[.!?\u0964])\\s+");
         for (int i = 0; i < parts.length; i++) {
             String p = parts[i].trim();
             if (p.isEmpty()) continue;
@@ -276,8 +345,9 @@ public class UltronService extends Service implements PhoneTools.Host {
     private void speechFinished() {
         if (!speaking) return;
         speaking = false;
+        awakeUntil = System.currentTimeMillis() + AWAKE_MS;   // 30 s of waiting after he finishes talking
         overlay.setMode(HologramView.LISTEN);
-        overlay.hideLater(4000);
+        overlay.hideLater(AWAKE_MS);                           // circle stays visible while he is awake
         ui.postDelayed(this::startListening, 300);
     }
 
@@ -298,6 +368,7 @@ public class UltronService extends Service implements PhoneTools.Host {
         ui.post(() -> { pendingConfirm = action; awakeUntil = System.currentTimeMillis() + 30000; });
     }
     @Override public void flash() { overlay.flash(); }
+    @Override public String hologramUrl(String prompt) { return holoServer.start() ? holoServer.url(prompt) : null; }
     @Override public void shutDown() {
         ui.post(() -> {
             stopped = true;
@@ -305,6 +376,7 @@ public class UltronService extends Service implements PhoneTools.Host {
             try { if (rec != null) rec.destroy(); } catch (Exception ignored) { }
             try { tts.stop(); tts.shutdown(); } catch (Exception ignored) { }
             overlay.hide();
+            holoServer.stop();
             if (wl != null && wl.isHeld()) wl.release();
             stopForeground(true);
             stopSelf();
@@ -317,6 +389,7 @@ public class UltronService extends Service implements PhoneTools.Host {
         try { if (rec != null) rec.destroy(); } catch (Exception ignored) { }
         try { if (tts != null) tts.shutdown(); } catch (Exception ignored) { }
         if (wl != null && wl.isHeld()) wl.release();
+        if (holoServer != null) holoServer.stop();
         worker.shutdownNow();
         super.onDestroy();
     }

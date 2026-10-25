@@ -1,5 +1,7 @@
 package com.jeevitesh.ultron;
 
+import android.app.ActivityManager;
+import android.content.ActivityNotFoundException;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
@@ -29,6 +31,8 @@ final class PhoneTools {
         void confirm(String label, Runnable action);
         void flash();
         void shutDown();
+        /** Starts the local hologram page server and returns the URL to open (with optional image prompt), or null. */
+        String hologramUrl(String prompt);
     }
 
     private final Context ctx;
@@ -50,6 +54,11 @@ final class PhoneTools {
             case "set_volume": return volume(a.optInt("percent", 50));
             case "set_timer": return timer(a.optInt("seconds", 60), a.optString("label", "Ultron timer"));
             case "repulsor_blast": blast(); return "repulsor fired";
+            case "open_hologram": return hologram("");
+            case "generate_image": return hologram(a.optString("prompt"));
+            case "close_app": return closeApp(a.optString("name"));
+            case "close_all_apps": return closeAll();
+            case "go_home": return goHome();
             case "open_ultron": start(new Intent(ctx, MainActivity.class)); return "opened the Ultron screen";
             case "stop_listening": host.shutDown(); return "shutting down";
             default: return "unknown tool";
@@ -60,13 +69,15 @@ final class PhoneTools {
 
     private static String norm(String s) { return s == null ? "" : s.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]", ""); }
 
-    private String openApp(String name) {
+    /** Finds the installed launcher app whose name best matches, or null. */
+    private ResolveInfo findApp(String name) {
         String q = norm(name);
         if (q.equals("insta") || q.equals("ig")) q = "instagram";
         if (q.equals("gpay")) q = "googlepay";
         if (q.equals("phonepay") || q.equals("phonepe")) q = "phonepe";
         if (q.equals("mail") || q.equals("email")) q = "gmail";
-        if (q.isEmpty()) return "no app name given";
+        if (q.equals("chrome") || q.equals("browser")) q = "chrome";
+        if (q.isEmpty()) return null;
         PackageManager pm = ctx.getPackageManager();
         Intent main = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
         List<ResolveInfo> list = pm.queryIntentActivities(main, 0);
@@ -75,14 +86,82 @@ final class PhoneTools {
         for (ResolveInfo ri : list) {
             String label = norm(String.valueOf(ri.loadLabel(pm)));
             if (label.isEmpty()) continue;
-            int s = label.equals(q) ? 100 : label.startsWith(q) ? 80 : label.contains(q) ? 60 : (q.contains(label) && label.length() >= 4) ? 40 : -1;
-            if (s > bestScore) { bestScore = s; best = ri; }
+            int sc = label.equals(q) ? 100 : label.startsWith(q) ? 80 : label.contains(q) ? 60 : (q.contains(label) && label.length() >= 4) ? 40 : -1;
+            if (sc > bestScore) { bestScore = sc; best = ri; }
         }
+        return best;
+    }
+
+    private String openApp(String name) {
+        if (norm(name).isEmpty()) return "no app name given. App names must be in English letters";
+        ResolveInfo best = findApp(name);
         if (best == null) return "no installed app matches " + name;
+        PackageManager pm = ctx.getPackageManager();
         Intent launch = pm.getLaunchIntentForPackage(best.activityInfo.packageName);
         if (launch == null) return "cannot launch " + name;
         try { start(launch); } catch (Exception e) { return "Android blocked opening it. Give Ultron the 'display over other apps' permission."; }
         return "opened " + best.loadLabel(pm);
+    }
+
+    // ---- hologram (opens a local page in Chrome) ----
+    String openHologramNow() { return hologram(""); }
+
+    private String hologram(String prompt) {
+        String url = host.hologramUrl(prompt == null ? "" : prompt.trim());
+        if (url == null) return "could not start the hologram page on this phone";
+        Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(url)).addCategory(Intent.CATEGORY_BROWSABLE);
+        i.setPackage("com.android.chrome");
+        try { start(i); return (prompt == null || prompt.trim().isEmpty()) ? "opened the hologram in Chrome" : "opened the hologram in Chrome and it is generating the image"; }
+        catch (ActivityNotFoundException e) { /* no Chrome, try the default browser */ }
+        catch (Exception e) { return "Android blocked opening Chrome. Give Ultron the 'display over other apps' permission."; }
+        i.setPackage(null);
+        try { start(i); return "Chrome is not installed, so the hologram opened in the default browser"; }
+        catch (Exception e) { return "no browser could open the hologram"; }
+    }
+
+    String goHome() {
+        UltronAccess acc = UltronAccess.instance;
+        if (acc != null) { acc.goHome(); return "went to the home screen"; }
+        try { start(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)); } catch (Exception e) { return "could not go home"; }
+        return "went to the home screen";
+    }
+
+    // ---- really closing apps ----
+    private String closeApp(String name) {
+        UltronAccess acc = UltronAccess.instance;
+        String n = norm(name);
+        String pkg, label;
+        if (n.isEmpty() || n.equals("this") || n.equals("thisapp") || n.equals("current") || n.equals("currentapp") || n.equals("it")) {
+            if (acc == null) return "FAILED: I cannot tell which app is open because Accessibility is not enabled for Ultron. Tell the user to enable it in the Ultron app, or to name the app";
+            pkg = acc.foregroundPackage();
+            if (pkg == null) return "FAILED: I could not detect the open app";
+            label = pkg;
+        } else {
+            ResolveInfo ri = findApp(name);
+            if (ri == null) return "FAILED: no installed app matches " + name + ". App names must be in English letters";
+            pkg = ri.activityInfo.packageName;
+            label = String.valueOf(ri.loadLabel(ctx.getPackageManager()));
+        }
+        if (pkg.equals(ctx.getPackageName())) return "that is Ultron himself. To shut him down the user says stop listening";
+        try {
+            ActivityManager am = (ActivityManager) ctx.getSystemService(Context.ACTIVITY_SERVICE);
+            am.killBackgroundProcesses(pkg);
+        } catch (Exception ignored) { }
+        if (acc == null) {
+            return "PARTLY: I only cleared " + label + " from the background. An app that is open on screen cannot be closed without Accessibility, "
+                    + "so it may still be running. Tell the user honestly and ask them to enable Accessibility for Ultron in the Ultron app";
+        }
+        String r = acc.forceStop(pkg);
+        if (r.equals("closed")) return "closed " + label + " (force stopped, verified the confirm button was pressed)";
+        if (r.equals("not_running")) return label + " was not running, nothing to close";
+        return "FAILED: I tried to force stop " + label + " but could not find or press the Force stop button on this phone. Do not say it is closed";
+    }
+
+    private String closeAll() {
+        UltronAccess acc = UltronAccess.instance;
+        if (acc == null) return "FAILED: Accessibility is not enabled for Ultron, so I cannot clear all apps. Tell the user to enable it in the Ultron app";
+        boolean ok = acc.clearRecents();
+        return ok ? "pressed Clear all in the recent apps screen" : "FAILED: I opened recent apps but could not find the Clear all button. Do not say the apps are closed";
     }
 
     private String openUrl(String url) {
@@ -111,7 +190,7 @@ final class PhoneTools {
     private String callContact(String name) {
         String[] r = findContact(name);
         if (r != null && r[0].isEmpty() && r[1].isEmpty()) return "Ultron has no permission to read contacts. Tell the user to grant the contacts permission in the Ultron app";
-        if (r == null) return "there is no contact named " + name;
+        if (r == null) return "there is no contact named " + name + ". If the contact may be saved in Telugu, try again with the Telugu spelling";
         return call(r[1].replaceAll("[ -]", ""), r[0]);
     }
 
@@ -126,7 +205,7 @@ final class PhoneTools {
         String number = to.replaceAll("[ -]", ""), who = to;
         if (!number.matches("^\\+?[0-9]{3,15}$")) {
             String[] r = findContact(to);
-            if (r == null) return "there is no contact named " + to;
+            if (r == null) return "there is no contact named " + to + ". If the contact may be saved in Telugu, try again with the Telugu spelling";
             if (r[1].isEmpty()) return "no permission to read contacts";
             number = r[1].replaceAll("[ -]", ""); who = r[0];
         }

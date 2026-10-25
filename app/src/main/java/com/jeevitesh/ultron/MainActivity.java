@@ -8,6 +8,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.PowerManager;
 import android.provider.Settings;
+import android.speech.tts.TextToSpeech;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.ViewGroup;
@@ -27,6 +28,7 @@ public class MainActivity extends Activity {
     private CheckBox crudeBox;
     private TextView status;
     private HologramView holo;
+    private Button langBtn;
 
     private int dp(int v) { return Math.round(v * getResources().getDisplayMetrics().density); }
 
@@ -68,7 +70,7 @@ public class MainActivity extends Activity {
         root.addView(keyBox);
 
         modelBox = new EditText(this);
-        modelBox.setHint("Model (default openai/gpt-oss-20b)");
+        modelBox.setHint("Model (default openai/gpt-oss-120b)");
         modelBox.setTextColor(0xFFFFFFFF);
         modelBox.setHintTextColor(0xFF886666);
         modelBox.setText(Prefs.model(this));
@@ -80,6 +82,10 @@ public class MainActivity extends Activity {
         crudeBox.setChecked(Prefs.crude(this));
         root.addView(crudeBox);
 
+        langBtn = button("", this::toggleLang);
+        root.addView(langBtn);
+        updateLangButton();
+
         root.addView(button("1. Save key", this::save));
         root.addView(button("2. Grant permissions", this::grant));
         root.addView(button("3. Start Ultron (always listening)", this::startIt));
@@ -88,6 +94,8 @@ public class MainActivity extends Activity {
             refresh();
         }));
         root.addView(button("Battery: set to Unrestricted", this::battery));
+        root.addView(button("Enable Accessibility (so Ultron can really close apps)", this::accessibility));
+        root.addView(button("Install Telugu voice (for Ultron to speak Telugu)", this::installTeluguVoice));
 
         status = new TextView(this);
         status.setTextColor(0xFFFFC933);
@@ -107,7 +115,34 @@ public class MainActivity extends Activity {
         boolean ov = Settings.canDrawOverlays(this);
         boolean ct = checkSelfPermission(Manifest.permission.READ_CONTACTS) == android.content.pm.PackageManager.PERMISSION_GRANTED;
         status.setText("Key: " + k + "\nMic: " + (mic ? "ok" : "MISSING") + "\nContacts: " + (ct ? "ok" : "MISSING")
-                + "\nDraw over apps: " + (ov ? "ok" : "MISSING") + "\nUltron: " + (UltronService.running ? "LISTENING" : "off"));
+                + "\nDraw over apps: " + (ov ? "ok" : "MISSING")
+                + "\nAccessibility (closing apps): " + (UltronAccess.instance != null ? "ok" : "OFF - tap the Accessibility button")
+                + "\nLanguage: " + ("te".equals(Prefs.lang(this)) ? "Telugu (+English words)" : "English")
+                + "\nUltron: " + (UltronService.running ? "LISTENING" : "off"));
+    }
+
+    private void updateLangButton() {
+        langBtn.setText("te".equals(Prefs.lang(this)) ? "Language: Telugu  (tap for English)" : "Language: English  (tap for Telugu)");
+    }
+
+    private void toggleLang() {
+        Prefs.setLang(this, "te".equals(Prefs.lang(this)) ? "en" : "te");
+        updateLangButton();
+        refresh();
+    }
+
+    private void accessibility() {
+        Toast.makeText(this, "Find 'Ultron' in the list and turn it ON. If it is greyed out: Settings > Apps > Ultron > menu > Allow restricted settings", Toast.LENGTH_LONG).show();
+        startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
+    }
+
+    private void installTeluguVoice() {
+        try {
+            startActivity(new Intent(TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA));
+        } catch (Exception e) {
+            try { startActivity(new Intent("com.android.settings.TTS_SETTINGS")); }
+            catch (Exception e2) { Toast.makeText(this, "Open Settings > Language > Text-to-speech > Google > Install voice data > Telugu", Toast.LENGTH_LONG).show(); }
+        }
     }
 
     private void save() {
