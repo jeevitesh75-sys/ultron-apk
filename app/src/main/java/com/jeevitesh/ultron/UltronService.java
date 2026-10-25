@@ -45,6 +45,7 @@ public class UltronService extends Service implements PhoneTools.Host {
     private PowerManager.WakeLock wl;
     private PhoneTools tools;
     private int errorCount = 0;
+    private String currentSpeech = "";
 
     @Override public IBinder onBind(Intent i) { return null; }
 
@@ -115,8 +116,7 @@ public class UltronService extends Service implements PhoneTools.Host {
     // ---- listening loop ----
     private void startListening() {
         if (stopped) return;
-        if (speaking) { ui.postDelayed(this::startListening, 500); return; }
-        try {
+                try {
             if (rec != null) { rec.destroy(); rec = null; }
             if (!SpeechRecognizer.isRecognitionAvailable(this)) { notifyText("Speech recognition is not available on this phone."); return; }
             rec = SpeechRecognizer.createSpeechRecognizer(this);
@@ -185,7 +185,20 @@ public class UltronService extends Service implements PhoneTools.Host {
     }
 
     private void handleHeard(List<String> alts) {
-        if (alts.isEmpty() || busy) return;
+        if (alts.isEmpty()) return;
+        if (speaking) {
+            for (String a : alts) {
+                String t = a.toLowerCase(Locale.ROOT).replaceAll("[^a-z ]", " ").trim();
+                if (t.matches("(.*\\b)?(stop|quiet|enough|shut up|be quiet|cancel|silence)(\\b.*)?") && t.split("\\s+").length <= 4
+                        && !currentSpeech.contains(t)) {
+                    stopSpeaking();
+                    awakeUntil = System.currentTimeMillis() + AWAKE_MS;
+                    return;
+                }
+            }
+            return;
+        }
+        if (busy) return;
         long now = System.currentTimeMillis();
         boolean awake = now < awakeUntil;
         String cmd = null;
@@ -213,7 +226,11 @@ public class UltronService extends Service implements PhoneTools.Host {
         if (woke) {
             overlay.show(HologramView.LISTEN);
             awakeUntil = now + AWAKE_MS;
-            if (cmd.isEmpty()) { say("I am listening."); return; }
+            if (cmd.isEmpty()) {
+                try { ((android.os.Vibrator) getSystemService(Context.VIBRATOR_SERVICE)).vibrate(android.os.VibrationEffect.createOneShot(80, 200)); } catch (Exception ignored) { }
+                overlay.hideLater(AWAKE_MS);
+                return;
+            }
         }
         if (cmd.isEmpty()) return;
         think(cmd);
@@ -244,7 +261,7 @@ public class UltronService extends Service implements PhoneTools.Host {
         overlay.show(HologramView.SPEAK);
         if (!ttsReady) { speechFinished(); return; }
         speaking = true;
-        try { if (rec != null) rec.cancel(); } catch (Exception ignored) { }
+        currentSpeech = text.toLowerCase(Locale.ROOT);
         String[] parts = text.replaceAll("[*#_`]", "").split("(?<=[.!?])\\s+");
         tts.stop();
         for (int i = 0; i < parts.length; i++) {
@@ -260,7 +277,7 @@ public class UltronService extends Service implements PhoneTools.Host {
         if (!speaking) return;
         speaking = false;
         overlay.setMode(HologramView.LISTEN);
-        overlay.hideLater(1800);
+        overlay.hideLater(4000);
         ui.postDelayed(this::startListening, 300);
     }
 
